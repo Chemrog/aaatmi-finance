@@ -10,7 +10,7 @@ Deploy adaptado del `docker-compose.prod.yml` oficial de [bigcapitalhq/bigcapita
 | `garage` (S3 self-hosted) | **omitido** → S3 externo (Cloudflare R2) | Ya usas R2 en Chatmu; evita clonar el repo y montar configs. |
 | `clickhouse` | **omitido** (`CLICKHOUSE_ENABLED=false`) | Analytics opcional. |
 | `auto-update` (watchtower) | **omitido** | Coolify gestiona las actualizaciones. Además watchtower monta el docker.sock (riesgo). |
-| `mysql` build custom | `mariadb:10.2` + `mysql-init/` | El build solo agregaba `bind-address` y el GRANT; se replica con un init script. |
+| `mysql` build custom | `mariadb:10.2` + GRANT inline (`configs`) | El build solo agregaba `bind-address` y el GRANT; se replica con un `config` inline. |
 | `redis` build custom | `redis:6.2.21` + `--appendonly yes` | Equivalente. |
 | `database_migration` build | `bigcapitalhq/server:latest` + comando | Evita clonar el repo; usa la misma imagen del server. |
 
@@ -33,8 +33,10 @@ cp .env.example .env
 # edita .env y llena al menos: BASE_URL, APP_JWT_SECRET, DB_PASSWORD, DB_ROOT_PASSWORD, MAIL_*
 ```
 
-> ⚠️ Si cambias `DB_USER` o `DB_PASSWORD`, actualiza también `mysql-init/10-grant.sql`
-> (ese script es SQL plano y no interpola variables de entorno).
+> ℹ️ **Autocontenido**: la config de Envoy (`/etc/envoy/envoy.yaml`) y el GRANT de MySQL
+> (`/docker-entrypoint-initdb.d/10-grant.sql`) van **inline** en el compose con `configs:`.
+> No dependen de archivos del repo. Si cambias `DB_USER`, actualiza el bloque `mysql_grant`
+> dentro de `docker-compose.coolify.yml` (debe coincidir con `DB_USER`).
 
 ### 3. Crear el recurso en Coolify
 

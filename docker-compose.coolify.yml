@@ -1,10 +1,11 @@
 # Bigcapital (self-hosted) — adaptado para Coolify
 # Base: docker-compose.prod.yml oficial de bigcapitalhq/bigcapital (AGPL-3.0)
 #
-# Publica el dominio en el servicio `proxy` (Envoy, puerto 80), que internamente
-# enruta:  /api  -> server:3000   |   resto -> webapp:80
+# Autocontenido: la config de Envoy y el GRANT de MySQL van inline vía `configs`,
+# así NO depende de archivos del repo (funciona igual clonando el repo o pegando el YAML).
 #
-# NO se publican los puertos 80/443 en el host: lo maneja Traefik (Coolify).
+# Publica el dominio en el servicio `proxy` (Envoy, puerto 80):
+#   /api  -> server:3000   |   resto -> webapp:80
 
 services:
   # Entry point. En Coolify, asigna el dominio a ESTE servicio, puerto 80.
@@ -13,8 +14,9 @@ services:
     restart: unless-stopped
     expose:
       - "80"
-    volumes:
-      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml
+    configs:
+      - source: envoy_config
+        target: /etc/envoy/envoy.yaml
     depends_on:
       - server
       - webapp
@@ -39,11 +41,8 @@ services:
       - redis
       - gotenberg
     environment:
-      # Application
       BASE_URL: ${BASE_URL}
       APP_JWT_SECRET: ${APP_JWT_SECRET}
-
-      # Mail
       MAIL_HOST: ${MAIL_HOST}
       MAIL_USERNAME: ${MAIL_USERNAME}
       MAIL_PASSWORD: ${MAIL_PASSWORD}
@@ -51,54 +50,36 @@ services:
       MAIL_SECURE: ${MAIL_SECURE}
       MAIL_FROM_NAME: ${MAIL_FROM_NAME}
       MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS}
-
-      # Databases
       DB_HOST: mysql
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_CHARSET: ${DB_CHARSET}
       SYSTEM_DB_NAME: ${SYSTEM_DB_NAME}
       TENANT_DB_NAME_PERFIX: ${TENANT_DB_NAME_PERFIX}
-
-      # Redis / colas
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       QUEUE_HOST: redis
       QUEUE_PORT: "6379"
-
-      # ClickHouse (deshabilitado)
       CLICKHOUSE_ENABLED: "false"
-
-      # Sign-up restrictions
       SIGNUP_DISABLED: ${SIGNUP_DISABLED}
       SIGNUP_ALLOWED_DOMAINS: ${SIGNUP_ALLOWED_DOMAINS}
       SIGNUP_ALLOWED_EMAILS: ${SIGNUP_ALLOWED_EMAILS}
       SIGNUP_EMAIL_CONFIRMATION: ${SIGNUP_EMAIL_CONFIRMATION}
-
-      # PDF (Gotenberg)
       GOTENBERG_URL: http://gotenberg:3000
       GOTENBERG_DOCS_URL: http://server:3000/public/
-
-      # Exchange rates
       EXCHANGE_RATE_SERVICE: ${EXCHANGE_RATE_SERVICE}
       OPEN_EXCHANGE_RATE_APP_ID: ${OPEN_EXCHANGE_RATE_APP_ID}
-
-      # S3 (Cloudflare R2)
       S3_REGION: ${S3_REGION}
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
       S3_ENDPOINT: ${S3_ENDPOINT}
       S3_BUCKET: ${S3_BUCKET}
       S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE}
-
-      # Stripe (cobros de facturas)
       STRIPE_PAYMENT_SECRET_KEY: ${STRIPE_PAYMENT_SECRET_KEY}
       STRIPE_PAYMENT_PUBLISHABLE_KEY: ${STRIPE_PAYMENT_PUBLISHABLE_KEY}
       STRIPE_PAYMENT_CLIENT_ID: ${STRIPE_PAYMENT_CLIENT_ID}
       STRIPE_PAYMENT_WEBHOOKS_SECRET: ${STRIPE_PAYMENT_WEBHOOKS_SECRET}
       STRIPE_PAYMENT_REDIRECT_URL: ${STRIPE_PAYMENT_REDIRECT_URL}
-
-      # Throttling
       THROTTLE_GLOBAL_TTL: ${THROTTLE_GLOBAL_TTL}
       THROTTLE_GLOBAL_LIMIT: ${THROTTLE_GLOBAL_LIMIT}
       THROTTLE_AUTH_TTL: ${THROTTLE_AUTH_TTL}
@@ -106,20 +87,21 @@ services:
     networks:
       - bigcapital
 
-  # Corre una sola vez y termina (exit 0). Si Coolify lo marca detenido, es normal.
+  # Corre migraciones y termina (exit 0). El CLI vive en /app/packages/server.
   migration:
     image: bigcapitalhq/server:latest
-    container_name: bigcapital-database-migration
     restart: "no"
     depends_on:
       - mysql
-    command: sh -c "until nc -z mysql 3306; do echo 'esperando mysql...'; sleep 3; done; node dist/cli.js system:migrate:latest && node dist/cli.js tenants:migrate:latest"
+    command: >
+      sh -c "until nc -z mysql 3306; do echo 'esperando mysql...'; sleep 3; done;
+      if [ -f /app/packages/server/dist/cli.js ]; then cd /app/packages/server; fi;
+      node dist/cli.js system:migrate:latest && node dist/cli.js tenants:migrate:latest"
     networks:
       - bigcapital
 
   mysql:
     image: mariadb:10.2
-    container_name: bigcapital-mysql
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: ${SYSTEM_DB_NAME}
@@ -128,7 +110,9 @@ services:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    configs:
+      - source: mysql_grant
+        target: /docker-entrypoint-initdb.d/10-grant.sql
     expose:
       - "3306"
     networks:
@@ -136,7 +120,6 @@ services:
 
   redis:
     image: redis:6.2.21
-    container_name: bigcapital-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
@@ -154,11 +137,81 @@ services:
     networks:
       - bigcapital
 
+configs:
+  envoy_config:
+    content: |
+      static_resources:
+        listeners:
+          - name: listener_0
+            address:
+              socket_address:
+                address: 0.0.0.0
+                port_value: 80
+            filter_chains:
+              - filters:
+                  - name: envoy.filters.network.http_connection_manager
+                    typed_config:
+                      '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                      stat_prefix: ingress_http
+                      route_config:
+                        name: local_route
+                        virtual_hosts:
+                          - name: backend
+                            domains: ['*']
+                            routes:
+                              - match:
+                                  prefix: '/api'
+                                route:
+                                  cluster: dynamic_server
+                              - match:
+                                  prefix: '/'
+                                route:
+                                  cluster: webapp
+                      http_filters:
+                        - name: envoy.filters.http.router
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        clusters:
+          - name: dynamic_server
+            connect_timeout: 0.25s
+            type: STRICT_DNS
+            dns_lookup_family: V4_ONLY
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: dynamic_server
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: server
+                            port_value: 3000
+          - name: webapp
+            connect_timeout: 0.25s
+            type: STRICT_DNS
+            dns_lookup_family: V4_ONLY
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: webapp
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: webapp
+                            port_value: 80
+
+  # El usuario lo crea la imagen oficial con MYSQL_USER/MYSQL_PASSWORD.
+  # Aquí solo se le dan privilegios globales para crear las DBs por tenant.
+  # NOTA: el nombre debe coincidir con DB_USER del .env.
+  mysql_grant:
+    content: |
+      GRANT ALL PRIVILEGES ON *.* TO 'bigcapital'@'%' WITH GRANT OPTION;
+      FLUSH PRIVILEGES;
+
 volumes:
   mysql_data:
-    name: bigcapital_mysql
   redis_data:
-    name: bigcapital_redis
 
 networks:
   bigcapital:
