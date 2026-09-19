@@ -93,6 +93,13 @@ services:
     restart: "no"
     depends_on:
       - mysql
+    environment:
+      DB_HOST: mysql
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_CHARSET: ${DB_CHARSET}
+      SYSTEM_DB_NAME: ${SYSTEM_DB_NAME}
+      TENANT_DB_NAME_PERFIX: ${TENANT_DB_NAME_PERFIX}
     command: >
       sh -c "until nc -z mysql 3306; do echo 'esperando mysql...'; sleep 3; done;
       if [ -f /app/packages/server/dist/cli.js ]; then cd /app/packages/server; fi;
