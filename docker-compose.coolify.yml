@@ -1,0 +1,165 @@
+# Bigcapital (self-hosted) — adaptado para Coolify
+# Base: docker-compose.prod.yml oficial de bigcapitalhq/bigcapital (AGPL-3.0)
+#
+# Publica el dominio en el servicio `proxy` (Envoy, puerto 80), que internamente
+# enruta:  /api  -> server:3000   |   resto -> webapp:80
+#
+# NO se publican los puertos 80/443 en el host: lo maneja Traefik (Coolify).
+
+services:
+  # Entry point. En Coolify, asigna el dominio a ESTE servicio, puerto 80.
+  proxy:
+    image: envoyproxy/envoy:v1.30-latest
+    restart: unless-stopped
+    expose:
+      - "80"
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml
+    depends_on:
+      - server
+      - webapp
+    networks:
+      - bigcapital
+
+  webapp:
+    image: bigcapitalhq/webapp:latest
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - bigcapital
+
+  server:
+    image: bigcapitalhq/server:latest
+    restart: unless-stopped
+    expose:
+      - "3000"
+    depends_on:
+      - mysql
+      - redis
+      - gotenberg
+    environment:
+      # Application
+      BASE_URL: ${BASE_URL}
+      APP_JWT_SECRET: ${APP_JWT_SECRET}
+
+      # Mail
+      MAIL_HOST: ${MAIL_HOST}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+      MAIL_PORT: ${MAIL_PORT}
+      MAIL_SECURE: ${MAIL_SECURE}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME}
+      MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS}
+
+      # Databases
+      DB_HOST: mysql
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_CHARSET: ${DB_CHARSET}
+      SYSTEM_DB_NAME: ${SYSTEM_DB_NAME}
+      TENANT_DB_NAME_PERFIX: ${TENANT_DB_NAME_PERFIX}
+
+      # Redis / colas
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      QUEUE_HOST: redis
+      QUEUE_PORT: "6379"
+
+      # ClickHouse (deshabilitado)
+      CLICKHOUSE_ENABLED: "false"
+
+      # Sign-up restrictions
+      SIGNUP_DISABLED: ${SIGNUP_DISABLED}
+      SIGNUP_ALLOWED_DOMAINS: ${SIGNUP_ALLOWED_DOMAINS}
+      SIGNUP_ALLOWED_EMAILS: ${SIGNUP_ALLOWED_EMAILS}
+      SIGNUP_EMAIL_CONFIRMATION: ${SIGNUP_EMAIL_CONFIRMATION}
+
+      # PDF (Gotenberg)
+      GOTENBERG_URL: http://gotenberg:3000
+      GOTENBERG_DOCS_URL: http://server:3000/public/
+
+      # Exchange rates
+      EXCHANGE_RATE_SERVICE: ${EXCHANGE_RATE_SERVICE}
+      OPEN_EXCHANGE_RATE_APP_ID: ${OPEN_EXCHANGE_RATE_APP_ID}
+
+      # S3 (Cloudflare R2)
+      S3_REGION: ${S3_REGION}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE}
+
+      # Stripe (cobros de facturas)
+      STRIPE_PAYMENT_SECRET_KEY: ${STRIPE_PAYMENT_SECRET_KEY}
+      STRIPE_PAYMENT_PUBLISHABLE_KEY: ${STRIPE_PAYMENT_PUBLISHABLE_KEY}
+      STRIPE_PAYMENT_CLIENT_ID: ${STRIPE_PAYMENT_CLIENT_ID}
+      STRIPE_PAYMENT_WEBHOOKS_SECRET: ${STRIPE_PAYMENT_WEBHOOKS_SECRET}
+      STRIPE_PAYMENT_REDIRECT_URL: ${STRIPE_PAYMENT_REDIRECT_URL}
+
+      # Throttling
+      THROTTLE_GLOBAL_TTL: ${THROTTLE_GLOBAL_TTL}
+      THROTTLE_GLOBAL_LIMIT: ${THROTTLE_GLOBAL_LIMIT}
+      THROTTLE_AUTH_TTL: ${THROTTLE_AUTH_TTL}
+      THROTTLE_AUTH_LIMIT: ${THROTTLE_AUTH_LIMIT}
+    networks:
+      - bigcapital
+
+  # Corre una sola vez y termina (exit 0). Si Coolify lo marca detenido, es normal.
+  migration:
+    image: bigcapitalhq/server:latest
+    container_name: bigcapital-database-migration
+    restart: "no"
+    depends_on:
+      - mysql
+    command: sh -c "until nc -z mysql 3306; do echo 'esperando mysql...'; sleep 3; done; node dist/cli.js system:migrate:latest && node dist/cli.js tenants:migrate:latest"
+    networks:
+      - bigcapital
+
+  mysql:
+    image: mariadb:10.2
+    container_name: bigcapital-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${SYSTEM_DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    expose:
+      - "3306"
+    networks:
+      - bigcapital
+
+  redis:
+    image: redis:6.2.21
+    container_name: bigcapital-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    expose:
+      - "6379"
+    networks:
+      - bigcapital
+
+  gotenberg:
+    image: gotenberg/gotenberg:7
+    restart: unless-stopped
+    expose:
+      - "9000"
+    networks:
+      - bigcapital
+
+volumes:
+  mysql_data:
+    name: bigcapital_mysql
+  redis_data:
+    name: bigcapital_redis
+
+networks:
+  bigcapital:
+    driver: bridge

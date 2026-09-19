@@ -1,0 +1,12 @@
+# Secretos reales
+.env
+*.env
+!.env.example
+
+# Backups / exports
+*.sql.gz
+backup*/
+*.xlsx
+*.csv
+
+.DS_Store
